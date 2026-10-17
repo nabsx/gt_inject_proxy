@@ -1,7 +1,7 @@
 --====================================================================
---  NabanGacor Proxy v2.5.1 (GEMS CHECKER FIXED + VISUAL)
---  + Dialog inputs, whitelist, webhook, tracker, checkbox settings,
---  + showpath, confirm drop, autofarm, autofish, recent cmds, icons
+--  NabanGacor Proxy v2.6.2 (/cd instant drop)
+--  + Path toast, dialog inputs, whitelist, webhook, tracker
+--  + Gems checker fixed, path preview, /move, /goto
 --====================================================================
 
 local TAG = "`0[ `3NabanGacor `0] "
@@ -48,6 +48,9 @@ end
 -- 2. STATE
 ----------------------------------------------------------------------
 local state = {}
+state.pathtoast = true
+state.confirmdrop = false     -- <<< default OFF = instant drop
+
 local mode  = {}
 local cfg = {
     tax = 5, dropTax = 0, side = "right",
@@ -72,6 +75,7 @@ local whitelist = {}
 local tracker   = {}
 local recentCmds = {}
 local pendingDrop = nil
+local pendingPath = nil
 local gemsStats = {total = 0}
 
 local function setPos(k)
@@ -91,6 +95,101 @@ end
 local function isWhitelisted(name)
     return whitelist[strip(name):lower()] == true
 end
+
+-- ==================== PATH HELPERS ====================
+local function dirStr(dx, dy)
+    local parts = {}
+    if dx ~= 0 then
+        parts[#parts+1] = math.abs(dx).." blok "..(dx > 0 and "`2kanan" or "`4kiri")
+    end
+    if dy ~= 0 then
+        parts[#parts+1] = math.abs(dy).." blok "..(dy > 0 and "`4bawah" or "`2atas")
+    end
+    if #parts == 0 then return "-" end
+    return table.concat(parts, " `0, `9")
+end
+
+local function clampXY(x, y)
+    return math.max(0, math.min(199, x)), math.max(0, math.min(199, y))
+end
+
+local function findPathTraced(x, y, label)
+    x, y = math.floor(x), math.floor(y)
+    local me = GetLocal()
+    local cx, cy = math.floor(me.pos_x/32), math.floor(me.pos_y/32)
+    local dist = math.abs(x-cx) + math.abs(y-cy)
+    local t0 = os.clock()
+    FindPath(x, y)
+    local elapsed = os.clock() - t0
+    local timeStr = string.format("%.3f", elapsed)
+    local prefix = label and (label.." `0> `9") or ""
+    local msg = prefix.."Pathfinding `3"..dist.." `9blocks `0(`3"..timeStr.."`0s)"
+    say(msg)
+    if state.pathtoast then toast(msg) end
+    return dist, elapsed
+end
+
+local function pathPreview(tx, ty, mode)
+    tx, ty = clampXY(math.floor(tx), math.floor(ty))
+    local me = GetLocal()
+    local cx, cy = math.floor(me.pos_x/32), math.floor(me.pos_y/32)
+    local dx, dy = tx - cx, ty - cy
+    local dist = math.abs(dx) + math.abs(dy)
+    pendingPath = {x=tx, y=ty, mode=mode or "find"}
+    local b = "add_label_with_icon|big|`3Path Preview|left|6016|\n"..
+        "add_spacer|small|\n"..
+        "add_smalltext|`9Dari : (`3"..cx.."`, `3"..cy.."`9)|left|\n"..
+        "add_smalltext|`9Ke   : (`3"..tx.."`, `3"..ty.."`9)|left|\n"..
+        "add_spacer|small|\n"..
+        "add_smalltext|`9Arah : "..dirStr(dx, dy).."|left|\n"..
+        "add_smalltext|`9Total : `3"..dist.." `9blok|left|\n"..
+        "add_spacer|small|\n"..
+        "add_button|nb_path_go|`2Go Sekarang|noflags|0|0|\n"..
+        "add_button|nb_path_show|`9Preview Path (visual)|noflags|0|0|\n"..
+        "add_button|nb_path_cancel|`4Cancel|noflags|0|0|"
+    dialog("nab_pathpreview", b)
+end
+
+AddCallback("nb_pathbtn", "OnPacket", function(_, p)
+    if not p:find("action|dialog_return", 1, true) then return end
+    if p:find("buttonClicked|nb_path_go") and pendingPath then
+        local t = pendingPath
+        pendingPath = nil
+        if t.mode == "show" and PathFind then
+            pcall(function()
+                local path = PathFind(t.x, t.y)
+                if path and #path > 0 then
+                    for _, tile in ipairs(path) do fx(tile.x, tile.y, 88) end
+                    say("Path visual : `3"..#path.." `9blok")
+                end
+            end)
+        end
+        findPathTraced(t.x, t.y, "Go")
+        return true
+    end
+    if p:find("buttonClicked|nb_path_show") and pendingPath then
+        local t = pendingPath
+        if PathFind then
+            pcall(function()
+                local path = PathFind(t.x, t.y)
+                if path and #path > 0 then
+                    for _, tile in ipairs(path) do fx(tile.x, tile.y, 88) end
+                    say("Path preview: `3"..#path.." `9blok")
+                else
+                    say("`4No path found")
+                end
+            end)
+        else
+            say("`4PathFind tidak tersedia")
+        end
+        return true
+    end
+    if p:find("buttonClicked|nb_path_cancel") then
+        pendingPath = nil
+        say("`4Dibatalkan")
+        return true
+    end
+end)
 
 ----------------------------------------------------------------------
 -- 3. COMMAND REGISTRY
@@ -172,7 +271,7 @@ local function section(title, icon) return "add_spacer|small|\nadd_label_with_ic
 
 menuHome = function()
     local me = GetLocal()
-    local b = "add_label_with_icon|big|`3NabanGacor `9Proxy `0v2.5.1|left|1790|\n"..
+    local b = "add_label_with_icon|big|`3NabanGacor `9Proxy `0v2.6.2|left|1790|\n"..
         "add_spacer|small|\n"..
         "add_smalltext|`9World : `3"..me.world.."|left|\n"..
         "add_smalltext|`9Posisi : `3X "..math.floor(me.tile_x).."  Y "..math.floor(me.tile_y).."|left|\n"..
@@ -180,6 +279,8 @@ menuHome = function()
         "add_smalltext|`9Tax : `3"..cfg.tax.."%|left|\n"..
         "add_smalltext|`9Whitelist : `3"..(function() local n=0 for _ in pairs(whitelist) do n=n+1 end return n end)().."|left|\n"..
         "add_smalltext|`9Gems session : `2"..gemsStats.total.."|left|\n"..
+        "add_smalltext|`9Path toast : "..(state.pathtoast and "`2ON" or "`4OFF").."|left|\n"..
+        "add_smalltext|`9Confirm drop : "..(state.confirmdrop and "`2ON" or "`4OFF").."|left|\n"..
         section("Menu", 5772)
     for _, c in ipairs(cats) do
         local n = 0
@@ -258,6 +359,8 @@ menuStatus = function()
     b = b.."add_smalltext|`wTracker `0: `3"..trn.." player|left|\n"
     b = b.."add_smalltext|`wWebhook `0: "..(cfg.webhook ~= "" and "`2SET" or "`4UNSET").."|left|\n"
     b = b.."add_smalltext|`wGems session `0: `2"..gemsStats.total.."|left|\n"
+    b = b.."add_smalltext|`wPath toast `0: "..(state.pathtoast and "`2ON" or "`4OFF").."|left|\n"
+    b = b.."add_smalltext|`wConfirm drop `0: "..(state.confirmdrop and "`2ON" or "`4OFF").."|left|\n"
     b = b.."add_spacer|small|\n"..row("nb_home", "`@< Menu Utama")
     dialog("nab_menu", b)
 end
@@ -362,7 +465,6 @@ AddCallback("nb_buttons", "OnPacket", function(_, p)
         elseif rest == "float" then scanFloat()
         else scanMenu() end
     else
-        -- unknown nb_ button (nb_tax_go, nb_vb_go, nb_cd_go) — biarkan callback lain handle
         return
     end
     return true
@@ -416,31 +518,88 @@ cmd({"door"}, "util", "Masuk door by id", function(a)
     SendPacket(3, "action|join_request\nname|"..GetLocal().world.."|"..a.."\ninvitedWorld|0")
 end)
 
-cmd({"player"}, "util", "Teleport ke player", function(a)
+cmd({"player"}, "util", "Teleport ke player (dengan preview)", function(a)
     for _, p in pairs(GetPlayers()) do
         if strip(p.name):lower() == a:lower() then
             say("Player ketemu")
-            return FindPath(math.floor(p.pos_x/32), math.floor(p.pos_y/32))
+            return pathPreview(math.floor(p.pos_x/32), math.floor(p.pos_y/32), "find")
         end
     end
     say("Player `4tidak ketemu")
 end)
 
-cmd({"findpath"}, "util", "Pathfind ke x y", function(a)
-    local x, y = a:match("(%d+)%s+(%d+)")
+-- ==================== FIND PATH ====================
+cmd({"findpath", "fp"}, "util", "Pathfind + preview jarak: /findpath X Y", function(a)
+    local x, y = a:match("(%-?%d+)%s+(%-?%d+)")
     if not x then return say("`4Pakai: /findpath X Y") end
-    FindPath(tonumber(x), tonumber(y))
+    pathPreview(tonumber(x), tonumber(y), "find")
 end)
 
-cmd({"showpath"}, "util", "Preview path: /showpath X Y", function(a)
-    local x, y = a:match("(%d+)%s+(%d+)")
+cmd({"goto"}, "util", "Langsung findpath + toast: /goto X Y", function(a)
+    local x, y = a:match("(%-?%d+)%s+(%-?%d+)")
+    if not x then return say("`4Pakai: /goto X Y") end
+    x, y = clampXY(tonumber(x), tonumber(y))
+    findPathTraced(x, y, "Goto")
+end)
+
+cmd({"showpath", "sp"}, "util", "Preview path visual: /showpath X Y", function(a)
+    local x, y = a:match("(%-?%d+)%s+(%-?%d+)")
     if not x then return say("`4Pakai: /showpath X Y") end
-    x, y = tonumber(x), tonumber(y)
-    if IsSolid and IsSolid(x, y) then return say("`4Tile solid") end
-    local path = PathFind and PathFind(x, y) or nil
-    if not path or #path == 0 then return say("`4No path found") end
-    for _, t in ipairs(path) do fx(t.x, t.y, 88) end
-    say("Path `3"..#path.." `9tiles")
+    pathPreview(tonumber(x), tonumber(y), "show")
+end)
+
+toggleCmd({"pathtoast", "ptt"}, "util", "Toast tiap pathfinding (ON/OFF)", "pathtoast", "Path Toast", 6016)
+
+-- ==================== MOVE ====================
+cmd({"move", "mv"}, "util", "Move block: /move [up|down|left|right N] atau /move X Y", function(a)
+    local dir, num = a:match("^(%a+)%s+(%-?%d+)$")
+    if dir then
+        local n = tonumber(num) or 0
+        local me = GetLocal()
+        local cx, cy = math.floor(me.pos_x/32), math.floor(me.pos_y/32)
+        local dx, dy = 0, 0
+        dir = dir:lower()
+        if dir == "up" or dir == "u" then dy = -n
+        elseif dir == "down" or dir == "d" then dy = n
+        elseif dir == "left" or dir == "l" then dx = -n
+        elseif dir == "right" or dir == "r" then dx = n
+        else return say("`4Arah: up/down/left/right") end
+        return pathPreview(cx + dx, cy + dy, "find")
+    end
+    local rx, ry = a:match("^(%-?%d+)%s+(%-?%d+)$")
+    if rx then
+        local me = GetLocal()
+        local cx, cy = math.floor(me.pos_x/32), math.floor(me.pos_y/32)
+        return pathPreview(cx + tonumber(rx), cy + tonumber(ry), "find")
+    end
+    local me = GetLocal()
+    local cx, cy = math.floor(me.pos_x/32), math.floor(me.pos_y/32)
+    local b = "add_label_with_icon|big|`3Move By Block|left|6016|\n"..
+        "add_spacer|small|\n"..
+        "add_smalltext|`9Posisi sekarang : (`3"..cx.."`, `3"..cy.."`9)|left|\n"..
+        "add_spacer|small|\n"..
+        "add_text_input|mv_x|Geser X (+kanan, -kiri)|0|6|\n"..
+        "add_text_input|mv_y|Geser Y (+bawah, -atas)|0|6|\n"..
+        "add_spacer|small|\n"..
+        "add_smalltext|`9Contoh cepat:|left|\n"..
+        "add_smalltext|`0/move up 5 `9- geser 5 blok ke atas|left|\n"..
+        "add_smalltext|`0/move down 3 `9- geser 3 blok ke bawah|left|\n"..
+        "add_smalltext|`0/move 10 5 `9- offset X=10, Y=5|left|\n"..
+        "add_spacer|small|\n"..
+        "add_button|nb_move_go|`2Preview|noflags|0|0|"
+    dialog("nab_move", b)
+end)
+
+AddCallback("nb_movebtn", "OnPacket", function(_, p)
+    if not p:find("action|dialog_return", 1, true) then return end
+    if p:find("buttonClicked|nb_move_go") then
+        local dx = tonumber(p:match("mv_x|(%-?%d+)")) or 0
+        local dy = tonumber(p:match("mv_y|(%-?%d+)")) or 0
+        local me = GetLocal()
+        local cx, cy = math.floor(me.pos_x/32), math.floor(me.pos_y/32)
+        pathPreview(cx + dx, cy + dy, "find")
+        return true
+    end
 end)
 
 cmd({"cid"}, "util", "Buat akun baru", function() say("Membuat akun baru.."); sendPkt("action|growid") end)
@@ -560,7 +719,7 @@ toggleCmd({"blink"}, "util", "Skin berkedip", "blink", "Blink Skin", 1784,
         end)
     end)
 
--- ==================== GEMS CHECKER (FIXED + VISUAL) ====================
+-- ==================== GEMS CHECKER ====================
 cmd({"bjreset"}, "host", "Reset counter gems checker", function()
     gemsStats.total = 0
     say("Gems counter direset")
@@ -951,7 +1110,7 @@ end
 dropLocks = function(amount, spot, skipConfirm)
     amount = math.floor(tonumber(amount) or 0)
     if amount <= 0 then return say("`4Jumlah tidak valid") end
-    if not skipConfirm and amount > cfg.confirmThreshold then
+    if state.confirmdrop and not skipConfirm and amount > cfg.confirmThreshold then
         return confirmDrop(amount, function() dropLocks(amount, spot, true) end)
     end
     RunThread(function()
@@ -984,6 +1143,9 @@ dropLocks = function(amount, spot, skipConfirm)
 end
 
 cmd({"cd"}, "host", "Drop total WL: /cd 120 = 1 DL + 20 WL", function(a) dropLocks(a) end)
+
+-- Toggle confirm drop (untuk safety jika dibutuhkan)
+toggleCmd({"confirm"}, "host", "Dialog konfirmasi drop >100 (default OFF)", "confirmdrop", "Confirm Drop", 1796)
 
 local function dropOne(id, name)
     return function(a)
@@ -1042,7 +1204,7 @@ for i = 1, 4 do
     cmd({"setpos"..i, "sp"..i}, "host", "Set posisi player "..i, function() setPos(i) end)
     cmd({"pos"..i}, "host", "Ke posisi "..i, function()
         if not pos[i].x then return toast("`4Pos belum diset") end
-        FindPath(pos[i].x, pos[i].y)
+        pathPreview(pos[i].x, pos[i].y, "find")
     end)
     cmd({"win"..i, "w"..i}, "host", "Drop lock ke winner "..i, function(a)
         if not pos[i].x then return toast("`4Pos belum diset") end
@@ -1061,7 +1223,7 @@ cmd({"setposback", "spb"}, "host", "Set posisi asal", function()
 end)
 cmd({"back"}, "host", "Kembali ke posisi asal", function()
     if not pos.back.x then return toast("`4Pos belum diset") end
-    FindPath(pos.back.x, pos.back.y)
+    pathPreview(pos.back.x, pos.back.y, "find")
 end)
 
 cmd({"settax"}, "host", "Set persen tax", function(a)
@@ -1795,5 +1957,5 @@ end)
 ----------------------------------------------------------------------
 -- 14. START
 ----------------------------------------------------------------------
-say("Ketik `3/proxy `9untuk membuka menu (v2.5.1)")
-bubble("`9NabanGacor Proxy v2.5.1 berhasil di-inject.")
+say("Ketik `3/proxy `9untuk membuka menu (v2.6.2)")
+bubble("`9NabanGacor Proxy v2.6.2 berhasil di-inject.")
