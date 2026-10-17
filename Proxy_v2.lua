@@ -1,7 +1,7 @@
 --====================================================================
---  NabanGacor Proxy v2.0 (FINAL + /load1 + /world dialog)
---  Struktur baru: command router + menu dialog berbasis tombol
---  Tambah command baru cukup 1 blok cmd(...), menu ikut otomatis.
+--  NabanGacor Proxy v2.5.1 (GEMS CHECKER FIXED + VISUAL)
+--  + Dialog inputs, whitelist, webhook, tracker, checkbox settings,
+--  + showpath, confirm drop, autofarm, autofish, recent cmds, icons
 --====================================================================
 
 local TAG = "`0[ `3NabanGacor `0] "
@@ -56,6 +56,9 @@ local cfg = {
     spamText = "Set your spam text!", spamDelay = 5,
     vendBuy = 1,
     visualSpin = nil,
+    webhook = "",
+    seedId = nil,
+    confirmThreshold = 100,
 }
 local VIS_SPIN_COLOR = {
     [0]=2, [1]=4, [2]="b", [3]=4, [4]="b", [5]=4, [6]="b", [7]=4, [8]="b", [9]=4,
@@ -65,12 +68,28 @@ local VIS_SPIN_COLOR = {
 }
 local pos = {{}, {}, {}, {}, back = {}}
 local allowPick = {}
+local whitelist = {}
+local tracker   = {}
+local recentCmds = {}
+local pendingDrop = nil
+local gemsStats = {total = 0}
 
 local function setPos(k)
     local me = GetLocal()
     pos[k] = {x = math.floor(me.pos_x/32), y = math.floor(me.pos_y/32)}
     fx(pos[k].x, pos[k].y, 354)
     say("Pos `3"..tostring(k).." `9diset ke `3"..pos[k].x.." `9, `3"..pos[k].y)
+end
+
+local function webhookLog(title, desc, color)
+    if not cfg.webhook or cfg.webhook == "" then return end
+    local safe = tostring(desc):gsub('"', "'")
+    local json = '{"embeds":[{"title":"'..title..'","description":"'..safe..'","color":'..(color or 5814783)..'}]}'
+    pcall(function() SendWebhook(cfg.webhook, json) end)
+end
+
+local function isWhitelisted(name)
+    return whitelist[strip(name):lower()] == true
 end
 
 ----------------------------------------------------------------------
@@ -113,7 +132,10 @@ AddCallback("nb_router", "OnPacket", function(_, packet)
     local name, args = body:match("^(%S*)%s*(.-)%s*$")
     local main = aliases[(name or ""):lower()]
     if not main then return end
-    commands[main].fn(args or "")
+    table.insert(recentCmds, 1, main)
+    if #recentCmds > 5 then table.remove(recentCmds) end
+    local ok, err = pcall(commands[main].fn, args or "")
+    if not ok then say("`4Error `3"..main.."`4: "..tostring(err)) end
     return true
 end)
 
@@ -145,24 +167,35 @@ defMode("safe",     "Safe Mode",    278,  "util",  {"banleave","unaccess","leave
 local menuHome, menuCat, menuMode, menuStatus
 
 local function row(id, label) return "add_button|"..id.."|"..label.."|noflags|0|0|\n" end
-local function onoff(on) return on and "`2[ ON ]  `w" or "`4[ OFF ] `w" end
+local function onoff(on) return on and "`2● ON  `w" or "`4○ OFF `w" end
 local function section(title, icon) return "add_spacer|small|\nadd_label_with_icon|small|`3"..title.."|left|"..icon.."|\n" end
 
 menuHome = function()
     local me = GetLocal()
-    local b = "add_label_with_icon|big|`3NabanGacor `9Proxy `0v2|left|1790|\n"..
+    local b = "add_label_with_icon|big|`3NabanGacor `9Proxy `0v2.5.1|left|1790|\n"..
         "add_spacer|small|\n"..
         "add_smalltext|`9World : `3"..me.world.."|left|\n"..
         "add_smalltext|`9Posisi : `3X "..math.floor(me.tile_x).."  Y "..math.floor(me.tile_y).."|left|\n"..
         "add_smalltext|`9Ping : `3"..math.floor(GetPing()).." ms|left|\n"..
         "add_smalltext|`9Tax : `3"..cfg.tax.."%|left|\n"..
+        "add_smalltext|`9Whitelist : `3"..(function() local n=0 for _ in pairs(whitelist) do n=n+1 end return n end)().."|left|\n"..
+        "add_smalltext|`9Gems session : `2"..gemsStats.total.."|left|\n"..
         section("Menu", 5772)
     for _, c in ipairs(cats) do
         local n = 0
         for _, main in ipairs(order) do if commands[main].cat == c.id then n = n + 1 end end
         b = b..row("nb_c_"..c.id, "`w"..c.title.."  `0("..n.." command)")
     end
+    if #recentCmds > 0 then
+        b = b..section("Recent Commands", 758)
+        for i, m in ipairs(recentCmds) do
+            if commands[m] then
+                b = b.."add_label_with_icon|small|`3/"..m.." `9- "..commands[m].desc.."|left|"..(commands[m].opt and commands[m].opt.icon or 758).."|\n"
+            end
+        end
+    end
     b = b.."add_spacer|small|\n"..row("nb_status", "`2Status Fitur")
+    b = b..row("nb_settings", "`2Settings (multi-toggle)")
     dialog("nab_menu", b)
 end
 
@@ -182,13 +215,14 @@ menuCat = function(id)
             mods = mods..row("nb_mp_"..key, "`w"..m.title.."  `0: `3"..mode[key])
         end
     end
-    if toggles ~= "" then b = b..section("Toggle (tap untuk ON/OFF)", 1790)..toggles end
+    if toggles ~= "" then b = b..section("Toggle", 1790)..toggles end
     if mods ~= "" then b = b..section("Pengaturan", 32)..mods end
     b = b..section("Daftar Command", 5772)
     for _, main in ipairs(order) do
         local x = commands[main]
         if x.cat == id then
-            b = b.."add_smalltext|`3/"..table.concat(x.names, " `0atau `3/").." `0- `9"..x.desc.."|left|\n"
+            local iconId = x.opt and x.opt.icon or c.icon
+            b = b.."add_label_with_icon|small|`0/"..table.concat(x.names, " `0atau `3/").." `0- `9"..x.desc.."|left|"..iconId.."|\n"
         end
     end
     b = b.."add_spacer|small|\n"..row("nb_home", "`@< Menu Utama")
@@ -217,8 +251,31 @@ menuStatus = function()
     for key, m in pairs(modes) do
         b = b.."add_smalltext|`w"..m.title.." `0: `3"..mode[key].."|left|\n"
     end
+    b = b..section("Info", 96)
+    local wln = 0; for _ in pairs(whitelist) do wln = wln + 1 end
+    local trn = 0; for _ in pairs(tracker) do trn = trn + 1 end
+    b = b.."add_smalltext|`wWhitelist `0: `3"..wln.." player|left|\n"
+    b = b.."add_smalltext|`wTracker `0: `3"..trn.." player|left|\n"
+    b = b.."add_smalltext|`wWebhook `0: "..(cfg.webhook ~= "" and "`2SET" or "`4UNSET").."|left|\n"
+    b = b.."add_smalltext|`wGems session `0: `2"..gemsStats.total.."|left|\n"
     b = b.."add_spacer|small|\n"..row("nb_home", "`@< Menu Utama")
     dialog("nab_menu", b)
+end
+
+local function settingsDialog()
+    local b = "add_label_with_icon|big|`3Settings Multi-Toggle|left|5772|\nadd_spacer|small|\n"
+    local any = false
+    for _, main in ipairs(order) do
+        local x = commands[main]
+        if x.opt then
+            any = true
+            b = b.."add_checkbox|chk_"..main.."|`w"..x.opt.label.."|"..(state[x.opt.tog] and "1" or "0").."|\n"
+        end
+    end
+    if not any then b = b.."add_smalltext|`4No toggles available|left|\n" end
+    b = b.."add_spacer|small|\nadd_button|nb_apply_chk|`2Apply All|noflags|0|0|\n"
+    b = b.."add_button|nb_home|`@< Menu Utama|noflags|0|0|"
+    dialog("nab_settings", b)
 end
 
 ----------------------------------------------------------------------
@@ -264,11 +321,34 @@ end
 ----------------------------------------------------------------------
 AddCallback("nb_buttons", "OnPacket", function(_, p)
     if not p:find("action|dialog_return", 1, true) then return end
+    if p:find("buttonClicked|nb_apply_chk") then
+        for _, main in ipairs(order) do
+            local x = commands[main]
+            if x.opt then
+                local v = p:match("chk_"..main.."|(%d+)")
+                local want = (v == "1")
+                if want ~= state[x.opt.tog] then commands[main].fn("") end
+            end
+        end
+        say("Settings applied")
+        return true
+    end
+    if p:find("buttonClicked|nb_conf_yes") and pendingDrop then
+        local cb = pendingDrop.cb
+        pendingDrop = nil
+        cb()
+        return true
+    elseif p:find("buttonClicked|nb_conf_no") then
+        pendingDrop = nil
+        say("`4Dibatalkan")
+        return true
+    end
     local btn = p:match("buttonClicked|(nb_[%w_]+)")
     if not btn then return end
     local kind, rest = btn:match("^nb_(%a+)_?(.*)$")
     if kind == "home" then menuHome()
     elseif kind == "status" then menuStatus()
+    elseif kind == "settings" then settingsDialog()
     elseif kind == "c" then menuCat(rest)
     elseif kind == "mp" then menuMode(rest)
     elseif kind == "t" then
@@ -281,6 +361,9 @@ AddCallback("nb_buttons", "OnPacket", function(_, p)
         if rest == "blocks" then scanBlocks()
         elseif rest == "float" then scanFloat()
         else scanMenu() end
+    else
+        -- unknown nb_ button (nb_tax_go, nb_vb_go, nb_cd_go) — biarkan callback lain handle
+        return
     end
     return true
 end)
@@ -290,6 +373,7 @@ end)
 ----------------------------------------------------------------------
 cmd({"proxy", "commands", "menu"}, "util", "Buka menu utama", function() menuHome() end)
 cmd({"info"}, "util", "Status semua fitur", function() menuStatus() end)
+cmd({"settings", "stg"}, "util", "Settings multi-checkbox", function() settingsDialog() end)
 
 cmd({"ping"}, "util", "Lihat ping", function()
     local p = GetPing()
@@ -346,6 +430,17 @@ cmd({"findpath"}, "util", "Pathfind ke x y", function(a)
     local x, y = a:match("(%d+)%s+(%d+)")
     if not x then return say("`4Pakai: /findpath X Y") end
     FindPath(tonumber(x), tonumber(y))
+end)
+
+cmd({"showpath"}, "util", "Preview path: /showpath X Y", function(a)
+    local x, y = a:match("(%d+)%s+(%d+)")
+    if not x then return say("`4Pakai: /showpath X Y") end
+    x, y = tonumber(x), tonumber(y)
+    if IsSolid and IsSolid(x, y) then return say("`4Tile solid") end
+    local path = PathFind and PathFind(x, y) or nil
+    if not path or #path == 0 then return say("`4No path found") end
+    for _, t in ipairs(path) do fx(t.x, t.y, 88) end
+    say("Path `3"..#path.." `9tiles")
 end)
 
 cmd({"cid"}, "util", "Buat akun baru", function() say("Membuat akun baru.."); sendPkt("action|growid") end)
@@ -465,16 +560,60 @@ toggleCmd({"blink"}, "util", "Skin berkedip", "blink", "Blink Skin", 1784,
         end)
     end)
 
-toggleCmd({"bj"}, "host", "Notif gems yang terkumpul", "bj", "Gems Checker", 112,
+-- ==================== GEMS CHECKER (FIXED + VISUAL) ====================
+cmd({"bjreset"}, "host", "Reset counter gems checker", function()
+    gemsStats.total = 0
+    say("Gems counter direset")
+end)
+cmd({"bjstats"}, "host", "Lihat total gems collected (session)", function()
+    say("Gems collected : `2+"..gemsStats.total)
+    say("Gems sekarang : `3"..GetLocal().gems)
+end)
+
+toggleCmd({"bj"}, "host", "Gems checker (visual + anti-double)", "bj", "Gems Checker", 112,
     function()
         RunThread(function()
+            local lastGems = GetLocal().gems
+            local pendingDiff = 0
+            local lastChangeAt = 0
+            local now = 0
+            local SHORT_WINDOW = 500
             while state.bj do
+                Sleep(100)
+                now = now + 100
                 if GetLocal().world ~= "EXIT" then
-                    local before = GetLocal().gems
-                    Sleep(1000)
-                    local diff = GetLocal().gems - before
-                    if diff ~= 0 then bubble("`9Collected `2+"..math.floor(diff).." `9Gems") end
-                else Sleep(1000) end
+                    local cur = GetLocal().gems
+                    if cur > lastGems then
+                        pendingDiff = pendingDiff + (cur - lastGems)
+                        lastGems = cur
+                        lastChangeAt = now
+                    elseif cur < lastGems then
+                        lastGems = cur
+                    end
+                    if pendingDiff > 0 and (now - lastChangeAt >= SHORT_WINDOW or pendingDiff >= 100) then
+                        local diff = pendingDiff
+                        pendingDiff = 0
+                        gemsStats.total = gemsStats.total + diff
+                        local me = GetLocal()
+                        fx(math.floor(me.pos_x/32), math.floor(me.pos_y/32), 112)
+                        if diff >= 100 then
+                            bubble("`0[`2+"..diff.." GEM!`0] `9total `2"..gemsStats.total)
+                            SendVarlist({[0]="OnTextOverlay", [1]=
+                                "`0+---------------+\n"..
+                                "`0| `2GEM  JACKPOT  `0|\n"..
+                                "`0| `w+"..diff.." `9gems     `0|\n"..
+                                "`0| `9total `2"..gemsStats.total.."      `0|\n"..
+                                "`0+---------------+", netid=-1})
+                            webhookLog("Gems", "Jackpot! +"..diff.." gems (total "..gemsStats.total..")", 5763719)
+                        elseif diff >= 10 then
+                            bubble("`0[`3+"..diff.."`0] `9gems `0| `9sum `2"..gemsStats.total)
+                        else
+                            bubble("`0[`9+"..diff.."`0] `9gem  `0| `9sum `2"..gemsStats.total)
+                        end
+                    end
+                else
+                    lastGems = GetLocal().gems
+                end
             end
         end)
     end)
@@ -486,6 +625,7 @@ hook("nb_fireban", "OnVarlist", function(v)
         say("Player netid `3"..id.." `9pasang pocket lighter")
         sendPkt("action|wrench\n|netid|"..id)
         sendPkt("action|dialog_return\ndialog_name|popup\nnetID|"..id.."|\nbuttonClicked|worldban")
+        webhookLog("AutoBan", "Banned netid "..id.." (fire troller)", 15158332)
         return true
     end
 end)
@@ -518,6 +658,70 @@ hook("nb_welcome", "OnVarlist", function(v)
     end
 end)
 
+-- ==================== WHITELIST ====================
+cmd({"wl", "whitelist"}, "util", "Whitelist: /wl add|del|list nama", function(a)
+    local act, name = a:match("^(%a+)%s*(.*)$")
+    if act == "list" then
+        local l = {}
+        for k in pairs(whitelist) do l[#l+1] = k end
+        return say("Whitelist : "..(table.concat(l, ", ") ~= "" and table.concat(l, ", ") or "-"))
+    elseif act == "add" and name ~= "" then
+        whitelist[strip(name):lower()] = true
+        say("Whitelist tambah: `3"..name)
+    elseif act == "del" and name ~= "" then
+        whitelist[strip(name):lower()] = nil
+        say("Whitelist hapus: `3"..name)
+    else
+        say("`4Pakai: /wl add|del|list nama")
+    end
+end)
+
+-- ==================== TRACKER ====================
+cmd({"track"}, "util", "Track player: /track add|del|list nama", function(a)
+    local act, name = a:match("^(%a+)%s*(.*)$")
+    if act == "list" then
+        local l = {}
+        for k in pairs(tracker) do l[#l+1] = k end
+        return say("Tracked : "..(table.concat(l, ", ") ~= "" and table.concat(l, ", ") or "-"))
+    elseif act == "add" and name ~= "" then
+        tracker[strip(name):lower()] = true
+        say("Track: `3"..name)
+    elseif act == "del" and name ~= "" then
+        tracker[strip(name):lower()] = nil
+        say("Untrack: `3"..name)
+    else
+        say("`4Pakai: /track add|del|list nama")
+    end
+end)
+hook("nb_track", "OnVarlist", function(v)
+    if v[0] == "OnSpawn" and not tostring(v[1]):find("type|local", 1, true) then
+        local raw = tostring(v[1]):match("name|(`.[^`]+)")
+        if raw and tracker[strip(raw):lower()] then
+            bubble("`9[TRACK] `3"..raw.." `9join!")
+            webhookLog("Tracker", raw.." joined "..GetLocal().world, 3066993)
+        end
+    end
+end)
+
+-- ==================== WEBHOOK ====================
+cmd({"webhook"}, "util", "Set Discord webhook: /webhook URL | /webhook off", function(a)
+    if a == "off" or a == "" then
+        cfg.webhook = ""
+        return say("Webhook dihapus")
+    end
+    cfg.webhook = a
+    say("Webhook diset")
+    webhookLog("Connected", "Webhook online. World: "..GetLocal().world, 5763719)
+end)
+
+-- ==================== RECENT ====================
+cmd({"recent"}, "util", "Lihat 5 command terakhir", function()
+    if #recentCmds == 0 then return say("Belum ada command terpakai") end
+    local l = {}
+    for i, m in ipairs(recentCmds) do l[#l+1] = "/"..m end
+    say("Recent : `3"..table.concat(l, " `0| `3"))
+end)
+
 ----------------------------------------------------------------------
 -- 9. WORLD
 ----------------------------------------------------------------------
@@ -525,18 +729,22 @@ local function eachPlayer(action, label)
     RunThread(function()
         say(label.." semua player")
         for _, p in pairs(GetPlayers()) do
-            sendPkt("action|input\n|text|/"..action.." "..p.name:sub(3, -3))
+            local n = strip(p.name)
+            if action == "ban" and isWhitelisted(n) then
+                say("`9Skip whitelist: `3"..n)
+            else
+                sendPkt("action|input\n|text|/"..action.." "..n)
+            end
             Sleep(80)
         end
     end)
 end
 cmd({"pullall"},  "world", "Pull semua player",  function() eachPlayer("pull", "Pull") end)
 cmd({"kickall"},  "world", "Kick semua player",  function() eachPlayer("kick", "Kick") end)
-cmd({"banall"},   "world", "Ban semua player",   function() eachPlayer("ban", "Ban") end)
+cmd({"banall"},   "world", "Ban semua player (skip whitelist)", function() eachPlayer("ban", "Ban") end)
 cmd({"tradeall"}, "world", "Trade semua player", function() eachPlayer("trade", "Trade") end)
 
--- /world : dialog shortcut (sama fungsinya dengan /pullall /kickall dst.)
-cmd({"world"}, "world", "Menu dialog World (pull/kick/trade/ban/unban)", function()
+cmd({"world"}, "world", "Menu dialog World", function()
     local b = "add_label_with_icon|big|`!World Commands|left|3802|\nadd_spacer|small|\n"
     b = b.."add_button|nwx_pull|`9Pull all players|noflags|0|0|\n"
     b = b.."add_button|nwx_kick|`9Kick all players|noflags|0|0|\n"
@@ -584,7 +792,6 @@ hook("nb_join", "OnVarlist", function(v)
 end)
 
 cmd({"unbanall"}, "world", "Unban world", function() sendPkt("action|input\n|text|/uba") end)
-
 cmd({"gs", "growscan"}, "world", "Growscan: /gs 1 blocks, /gs 2 floating", function(a)
     if a == "1" then scanBlocks() elseif a == "2" then scanFloat() else scanMenu() end
 end)
@@ -728,9 +935,25 @@ local function dropItem(id, amount)
     sendPkt("action|dialog_return\ndialog_name|drop_item\nitemID|"..id.."|\ncount|"..amount)
 end
 
-local function dropLocks(amount, spot)
+local dropLocks
+
+local function confirmDrop(amount, cb)
+    pendingDrop = {amount=amount, cb=cb}
+    local b = "add_label_with_icon|big|`4Konfirmasi Drop|left|1796|\nadd_spacer|small|\n"..
+        "add_smalltext|`9Kamu akan drop `3"..amount.." `9locks|left|\n"..
+        "add_smalltext|`4Yakin ingin melanjutkan?|left|\n"..
+        "add_spacer|small|\n"..
+        "add_button|nb_conf_yes|`2Ya, drop sekarang|noflags|0|0|\n"..
+        "add_button|nb_conf_no|`4Batal|noflags|0|0|"
+    dialog("nab_confirm", b)
+end
+
+dropLocks = function(amount, spot, skipConfirm)
     amount = math.floor(tonumber(amount) or 0)
     if amount <= 0 then return say("`4Jumlah tidak valid") end
+    if not skipConfirm and amount > cfg.confirmThreshold then
+        return confirmDrop(amount, function() dropLocks(amount, spot, true) end)
+    end
     RunThread(function()
         hook("nb_hideall", "OnVarlist", blockDialogs)
         if spot and spot.x then
@@ -891,7 +1114,6 @@ hook("nb_spin", "OnVarlist", function(v)
     if v[0] ~= "OnTalkBubble" or v[3] == -1 then return end
     local raw = tostring(v[2])
     if not raw:find("spun the wheel and got", 1, true) then return end
-
     if cfg.visualSpin then
         if not raw:find("CP:", 1, true) then
             SendVarlist({[0]="OnTalkBubble", [1]=v[1],
@@ -901,7 +1123,6 @@ hook("nb_spin", "OnVarlist", function(v)
             return true
         end
     end
-
     if mode.spin == "off" then return end
     local out
     if raw:find("CP:", 1, true) then
@@ -991,7 +1212,6 @@ local function crimeHook(v)
     local d = v[1]
     if d:find("Devil Ham``%'s `2Crush`` card `4melted") then cr.liq = "yes" end
     if d:find("Ms%. Terry") and d:find("Ban Hammer") then cr.ban = "yes" end
-
     if d:find("|Battle%!|") then
         cr.x, cr.y = d:match("tilex|(%d+)"), d:match("tiley|(%d+)")
         local vn = d:match("add_textbox|(.*)`` is")
@@ -1147,6 +1367,84 @@ end
 hook("nb_startopia", "OnVarlist", startopiaHook)
 toggleCmd({"autostartopia", "autost"}, "auto", "Auto startopia", "autostartopia", "Auto Startopia", 6532)
 
+-- AUTO-FARM
+cmd({"setseed"}, "auto", "Set seed id untuk autofarm (/setseed ID)", function(a)
+    local id = tonumber(a)
+    if not id or id % 2 == 0 then return say("`4Seed id harus ganjil (contoh: 3, 5, 7)") end
+    cfg.seedId = id
+    say("Seed autofarm : `3"..(GetIteminfo(id) and GetIteminfo(id).name or id))
+end)
+toggleCmd({"autofarm", "af"}, "auto", "Auto farm (harvest + plant)", "autofarm", "Auto Farm", 6950,
+    function()
+        if not cfg.seedId then say("`4Set dulu: /setseed ID") end
+        RunThread(function()
+            while state.autofarm do
+                local me = GetLocal()
+                local any = false
+                for _, t in pairs(GetTiles()) do
+                    if not state.autofarm then break end
+                    if t.ready and t.fg > 0 and t.fg % 2 == 1 then
+                        any = true
+                        FindPath(t.pos_x, t.pos_y)
+                        Sleep(150)
+                        local me2 = GetLocal()
+                        SendPacketRaw({type=3, int_data=18, pos_x=me2.pos_x, pos_y=me2.pos_y, int_x=t.pos_x, int_y=t.pos_y})
+                        Sleep(200)
+                    end
+                end
+                if not any and cfg.seedId then
+                    for _, t in pairs(GetTiles()) do
+                        if not state.autofarm then break end
+                        if t.fg == 2 and t.bg == 2 and not t.ready then
+                            FindPath(t.pos_x, t.pos_y)
+                            Sleep(150)
+                            local me2 = GetLocal()
+                            SendPacketRaw({type=3, int_data=cfg.seedId, pos_x=me2.pos_x, pos_y=me2.pos_y, int_x=t.pos_x, int_y=t.pos_y})
+                            Sleep(250)
+                        end
+                    end
+                end
+                Sleep(400)
+            end
+        end)
+    end)
+
+-- AUTO-FISH
+toggleCmd({"autofish", "afish"}, "auto", "Auto fish (experimental)", "autofish", "Auto Fish", 340,
+    function()
+        RunThread(function()
+            while state.autofish do
+                local me = GetLocal()
+                local found = false
+                for _, t in pairs(GetTiles()) do
+                    if not state.autofish then break end
+                    if t.water then
+                        found = true
+                        SendPacketRaw({type=3, int_data=18, pos_x=me.pos_x, pos_y=me.pos_y, int_x=t.pos_x, int_y=t.pos_y})
+                        Sleep(4000)
+                        break
+                    end
+                end
+                if not found then Sleep(1000) end
+            end
+        end)
+    end)
+hook("nb_fish", "OnVarlist", function(v)
+    if not state.autofish then return end
+    if v[0] ~= "OnDialogRequest" then return end
+    local d = v[1]
+    if d:find("end_dialog|fishing|", 1, true) then
+        local tx = embed(d, "tilex")
+        local ty = embed(d, "tiley")
+        for _, btn in ipairs({"cast","fish","reel","pull","ready"}) do
+            if d:find("add_button|"..btn.."|", 1, true) then
+                sendPkt("action|dialog_return\ndialog_name|fishing\ntilex|"..tx.."|\ntiley|"..ty.."|\nbuttonClicked|"..btn)
+                return true
+            end
+        end
+    end
+end)
+
 ----------------------------------------------------------------------
 -- 13. VISUAL
 ----------------------------------------------------------------------
@@ -1171,9 +1469,7 @@ toggleCmd({"saveclothe", "sc"}, "visual", "Pakai set visual tiap pindah world", 
 hook("nb_saveclothes", "OnVarlist", function(v)
     if state.saveclothes and v[0] == "OnMagicCompassTrackingItemIDChanged" then wear(); return true end
 end)
-
--- /load 1 : preset outfit dari v1
-cmd({"load1", "load"}, "visual", "Preset outfit 1 (hat 3042 / hair 2872 / wing 1784 / ances 5134)", function()
+cmd({"load1", "load"}, "visual", "Preset outfit 1", function()
     cl.hat, cl.hair, cl.wing, cl.ances = 3042, 2872, 1784, 5134
     say("Preset outfit 1 dimuat")
     wear()
@@ -1271,24 +1567,21 @@ end)
 ----------------------------------------------------------------------
 -- 13b. FITUR v1 YANG DIPINDAHKAN
 ----------------------------------------------------------------------
-
-cmd({"donatewl"}, "visual", "Bubble palsu donate WL: /donatewl N", function(a)
+cmd({"donatewl"}, "visual", "Bubble palsu donate WL", function(a)
     if a == "" then return say("`4Pakai: /donatewl jumlah") end
     SendVarlist({[0]="OnTalkBubble", [1]=GetLocal().netid,
         [2]="`7[```5[``"..GetLocal().name.." places`5"..a.."`` `2World Lock`` into the Donation Box`5]```7]``",
         [3]=0, [4]=0, netid=-1})
     say("Fake donate WL : `3"..a)
 end)
-
-cmd({"donatedl"}, "visual", "Bubble palsu donate DL: /donatedl N", function(a)
+cmd({"donatedl"}, "visual", "Bubble palsu donate DL", function(a)
     if a == "" then return say("`4Pakai: /donatedl jumlah") end
     SendVarlist({[0]="OnTalkBubble", [1]=GetLocal().netid,
         [2]="`7[```5[``"..GetLocal().name.." places`5"..a.."`` `2Diamond Lock`` into the Donation Box`5]```7]``",
         [3]=0, [4]=0, netid=-1})
     say("Fake donate DL : `3"..a)
 end)
-
-cmd({"donatebgl"}, "visual", "Bubble palsu donate BGL: /donatebgl N", function(a)
+cmd({"donatebgl"}, "visual", "Bubble palsu donate BGL", function(a)
     if a == "" then return say("`4Pakai: /donatebgl jumlah") end
     SendVarlist({[0]="OnTalkBubble", [1]=GetLocal().netid,
         [2]="`7[```5[``"..GetLocal().name.." places`5"..a.."`` `2Blue Gem Lock`` into the Donation Box`5]```7]``",
@@ -1296,7 +1589,7 @@ cmd({"donatebgl"}, "visual", "Bubble palsu donate BGL: /donatebgl N", function(a
     say("Fake donate BGL : `3"..a)
 end)
 
-cmd({"visualspin", "vspin"}, "visual", "Set visual spin N (0-36), /visualspin off", function(a)
+cmd({"visualspin", "vspin"}, "visual", "Set visual spin N (0-36)", function(a)
     if a == "off" or a == "reset" then
         cfg.visualSpin = nil
         return say("Visual spin : `4OFF")
@@ -1323,10 +1616,10 @@ cmd({"fakeban", "fban"}, "util", "Fake perma ban by system", function()
     SendVarlist({[0]="OnConsoleMessage",
         [1]="`4** `$"..name.."`` AUTO-BANNED BY SYSTEM **`` (`$/rules`` to view rules)", netid=-1})
     say("Fake ban triggered")
+    webhookLog("FakeBan", "Triggered fake ban", 15158332)
 end)
 
 local vaultPos = {x = nil, y = nil}
-
 cmd({"vault"}, "util", "Set x/y vault (Safe Vault) untuk /bypass", function()
     for _, t in pairs(GetTiles()) do
         if t.fg == 8878 then
@@ -1334,18 +1627,16 @@ cmd({"vault"}, "util", "Set x/y vault (Safe Vault) untuk /bypass", function()
             vaultPos.y = math.floor(t.pos_y / 32)
             fx(vaultPos.x, vaultPos.y, 354)
             say("Vault pos : `3"..vaultPos.x.." `0x `9"..vaultPos.y)
-            say("Wrench Storage Box lalu ketik `/3/bypass")
             return
         end
     end
-    say("`4Safe Vault (id 8878) tidak ditemukan di world ini")
+    say("`4Safe Vault (id 8878) tidak ditemukan")
 end)
-
 cmd({"bypass"}, "util", "Auto bypass vault (butuh min 1 Dirt)", function()
     if not vaultPos.x then return say("`4Ketik /vault dulu") end
     sendPkt("action|dialog_return\ndialog_name|storageboxxtreme\ntilex|"..vaultPos.x..
         "|\ntiley|"..vaultPos.y.."|\nitemid|2|\nbuttonClicked|do_add\nitemcount|1")
-    say("Bypass packet dikirim ke `3("..vaultPos.x..","..vaultPos.y..")")
+    say("Bypass dikirim ke `3("..vaultPos.x..","..vaultPos.y..")")
 end)
 
 toggleCmd({"dial34"}, "util", "Auto dial -34 saat buka telepon", "dial34", "Auto Dial -34", 3288,
@@ -1375,7 +1666,6 @@ local function doSafeAction(kind, label)
         [3]="audio/hub_open.wav", [4]=0, netid=-1})
     say("`#@"..label.." `4joined! (safe mode)")
     bubble("`9Collecting..")
-
     local me = GetLocal()
     for _, o in pairs(GetObjects()) do
         if math.abs(me.pos_x - o.pos_x) < 320 and math.abs(me.pos_y - o.pos_y) < 320 then
@@ -1384,7 +1674,12 @@ local function doSafeAction(kind, label)
     end
     if kind == "ban_leave" then
         for _, p in pairs(GetPlayers()) do
-            sendPkt("action|input\n|text|/ban "..strip(p.name))
+            local n = strip(p.name)
+            if not isWhitelisted(n) then
+                sendPkt("action|input\n|text|/ban "..n)
+            else
+                say("`9Skip whitelist: `3"..n)
+            end
         end
         sendPkt("action|input\n|text|/unaccess")
         sendPkt("action|dialog_return\ndialog_name|unaccess")
@@ -1394,6 +1689,7 @@ local function doSafeAction(kind, label)
     end
     SendPacket(3, "action|quit_to_exit")
     SendPacket(3, "action|join_request\nname|"..(cfg.saveWorld or "EXIT").."\ninvitedWorld|0")
+    webhookLog("SafeMode", label.." triggered "..kind.." in "..GetLocal().world, 15105570)
 end
 
 hook("nb_safe", "OnVarlist", function(v)
@@ -1422,7 +1718,7 @@ cmd({"safe"}, "util", "Safe mode: /safe 1|2|3|off", function(a)
     end
 end)
 
-cmd({"testmod"}, "util", "Test trigger safe mode (simulasi mod join)", function()
+cmd({"testmod"}, "util", "Test trigger safe mode", function()
     if mode.safe == "off" then
         return say("`4Aktifkan dulu: /safe 1|2|3")
     end
@@ -1433,7 +1729,71 @@ cmd({"testmod"}, "util", "Test trigger safe mode (simulasi mod join)", function(
 end)
 
 ----------------------------------------------------------------------
+-- 13c. TEXT INPUT DIALOGS
+----------------------------------------------------------------------
+cmd({"taxui"}, "host", "GUI hitung tax (input langsung)", function()
+    local b = "add_label_with_icon|big|`3Tax Calculator|left|758|\nadd_spacer|small|\n"..
+        "add_smalltext|`9Tax saat ini : `3"..cfg.tax.."%|left|\n"..
+        "add_text_input|tax_amt|Jumlah lock|100|6|\n"..
+        "add_spacer|small|\n"..
+        "add_button|nb_tax_go|`2Hitung|noflags|0|0|"
+    dialog("nab_tax", b)
+end)
+cmd({"vbui"}, "farm", "GUI set jumlah beli vend", function()
+    local b = "add_label_with_icon|big|`3Fast Buy Vend|left|2978|\nadd_spacer|small|\n"..
+        "add_smalltext|`9Jumlah beli saat ini : `3"..cfg.vendBuy.."|left|\n"..
+        "add_text_input|vb_amt|Jumlah beli|"..cfg.vendBuy.."|4|\n"..
+        "add_spacer|small|\n"..
+        "add_button|nb_vb_go|`2Set & Aktifkan|noflags|0|0|"
+    dialog("nab_vb", b)
+end)
+cmd({"cdui"}, "host", "GUI drop locks", function()
+    local b = "add_label_with_icon|big|`3Drop Locks|left|1796|\nadd_spacer|small|\n"..
+        "add_smalltext|`9WL : `3"..count(242).." `1& `9DL : `3"..count(1796).."|left|\n"..
+        "add_text_input|cd_amt|Total lock (WL)|100|7|\n"..
+        "add_spacer|small|\n"..
+        "add_button|nb_cd_go|`2Drop|noflags|0|0|"
+    dialog("nab_cd", b)
+end)
+
+AddCallback("nb_textinput", "OnPacket", function(_, p)
+    if not p:find("action|dialog_return", 1, true) then return end
+
+    if p:find("buttonClicked|nb_tax_go") then
+        local n = p:match("tax_amt|([%d%.]+)")
+        if n and tonumber(n) then
+            calcTax(math.floor(tonumber(n)))
+        else
+            say("`4Input tax tidak valid")
+        end
+        return true
+    end
+
+    if p:find("buttonClicked|nb_vb_go") then
+        local n = p:match("vb_amt|([%d%.]+)")
+        if n and tonumber(n) and tonumber(n) > 0 then
+            cfg.vendBuy = math.floor(tonumber(n))
+            setMode("vend", "buy")
+            say("Jumlah beli : `3"..cfg.vendBuy)
+        else
+            say("`4Input vend tidak valid")
+        end
+        return true
+    end
+
+    if p:find("buttonClicked|nb_cd_go") then
+        local n = p:match("cd_amt|([%d%.]+)")
+        if n and tonumber(n) and tonumber(n) > 0 then
+            dropLocks(math.floor(tonumber(n)))
+        else
+            say("`4Input lock tidak valid")
+        end
+        return true
+    end
+end)
+
+----------------------------------------------------------------------
 -- 14. START
 ----------------------------------------------------------------------
-say("Ketik `3/proxy `9untuk membuka menu")
-bubble("`9NabanGacor Proxy v2 berhasil di-inject.")
+say("Ketik `3/proxy `9untuk membuka menu (v2.5.1)")
+bubble("`9NabanGacor Proxy v2.5.1 berhasil di-inject.")
